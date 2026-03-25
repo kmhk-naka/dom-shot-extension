@@ -5,7 +5,7 @@
   "license": "MIT",
   "description": "Chrome extension for inspector-like DOM selection and full-size element screenshot capture.",
   "scripts": {
-    "build": "vite build --config vite.background.config.ts && vite build --config vite.content.config.ts && cp manifest.json dist/manifest.json",
+    "build": "vite build --config vite.background.config.ts && vite build --config vite.content.config.ts && cp manifest.json dist/manifest.json && mkdir -p dist/icons && cp -R icons/. dist/icons/",
     "package": "pnpm build && rm -f dom-shot-extension.zip && (cd dist && zip -r ../dom-shot-extension.zip .)",
     "dev": "vite build --watch --config vite.content.config.ts",
     "typecheck": "tsc --noEmit"

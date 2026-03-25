@@ -1,0 +1,18 @@
+{
+  "name": "dom-shot-extension",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Chrome extension for inspector-like DOM selection and full-size element screenshot capture.",
+  "scripts": {
+    "build": "vite build --config vite.background.config.ts && vite build --config vite.content.config.ts && cp manifest.json dist/manifest.json",
+    "package": "pnpm build && rm -f dom-shot-extension.zip && (cd dist && zip -r ../dom-shot-extension.zip .)",
+    "dev": "vite build --watch --config vite.content.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.30",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "DOM Shot Extension",
+  "version": "0.1.0",
+  "description": "Inspector-like DOM selection and full-size element screenshot capture.",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Start DOM Capture"
+  }
+}

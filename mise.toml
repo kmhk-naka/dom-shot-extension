@@ -1,0 +1,19 @@
+[tools]
+node = '24.14.0'
+pnpm = '10.12.4'
+
+[tasks.install]
+description = 'Install dependencies'
+run = 'pnpm install'
+
+[tasks.build]
+description = 'Build extension bundle'
+run = 'pnpm build'
+
+[tasks.package]
+description = 'Build and package dist as zip'
+run = 'pnpm package'
+
+[tasks.typecheck]
+description = 'Run TypeScript type checks'
+run = 'pnpm typecheck'

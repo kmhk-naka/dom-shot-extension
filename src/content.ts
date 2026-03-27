@@ -2,8 +2,6 @@ import {
   MESSAGE_TYPE,
   type CaptureResponse,
   type ContentRequestMessage,
-  type DownloadImageMessage,
-  type DownloadResponse,
   type RequestVisibleCaptureMessage,
   type StatusResponse
 } from './messages';
@@ -339,19 +337,9 @@ async function runCapture(selected: HTMLElement): Promise<void> {
       StatusResponse
     >({ type: MESSAGE_TYPE.CAPTURE_SESSION_STARTED });
 
-    const imageDataUrl = await captureElementImage(selected);
+    const imageBlob = await captureElementBlob(selected);
     const filename = buildDownloadFilename(selected);
-
-    const response = await sendMessageToBackground<DownloadImageMessage, DownloadResponse>({
-      type: MESSAGE_TYPE.DOWNLOAD_IMAGE,
-      dataUrl: imageDataUrl,
-      filename
-    });
-
-    if (!response.ok) {
-      throw new Error(response.error);
-    }
-
+    triggerBlobDownload(imageBlob, filename);
     showToast(`保存しました: ${filename}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -373,7 +361,7 @@ async function runCapture(selected: HTMLElement): Promise<void> {
   }
 }
 
-async function captureElementImage(element: HTMLElement): Promise<string> {
+async function captureElementBlob(element: HTMLElement): Promise<Blob> {
   if (!element.isConnected) {
     throw new Error('要素がDOMから削除されました。');
   }
@@ -393,6 +381,7 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
   const scrollableAncestors = collectScrollableAncestors(element);
   const markerState = createCaptureMarker(element);
   const originalScrollBehavior = document.documentElement.style.scrollBehavior;
+  let resultCanvas: HTMLCanvasElement | null = null;
 
   try {
     document.documentElement.style.scrollBehavior = 'auto';
@@ -434,11 +423,11 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
 
     for (const xOffset of xOffsets) {
       let requestYOffset = 0;
-      let lastCoveredBottom = -1;
       let columnMaxDrawnBottom = 0;
+      let columnMaxDrawnBottomLocal = 0;
 
       for (let iteration = 0; iteration < 180 && requestYOffset < outputHeight; iteration += 1) {
-        moveCaptureMarkerToOffset(markerState, xOffset, requestYOffset);
+        moveCaptureMarkerToOffset(markerState, scrollableAncestors, xOffset, requestYOffset);
         await waitForPaint();
 
         const currentRect = element.getBoundingClientRect();
@@ -505,36 +494,40 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
         const adjustedDestY = destY + overlapHeight;
         const adjustedDrawHeight = drawHeight - overlapHeight;
 
-        if (adjustedDrawHeight > 0) {
-          context.drawImage(
-            image,
-            sourceX,
-            adjustedSourceY,
-            drawWidth,
-            adjustedDrawHeight,
-            destX,
-            adjustedDestY,
-            drawWidth,
-            adjustedDrawHeight
-          );
-
-          maxDrawnRight = Math.max(maxDrawnRight, destX + drawWidth);
-          maxDrawnBottom = Math.max(maxDrawnBottom, adjustedDestY + adjustedDrawHeight);
-          columnMaxDrawnBottom = Math.max(columnMaxDrawnBottom, adjustedDestY + adjustedDrawHeight);
-        }
-
-        const coveredBottom = localTop + visible.height;
-        if (coveredBottom >= outputHeight - 1) {
+        if (adjustedDrawHeight <= 0) {
           break;
         }
 
-        const nextByCoverage = Math.max(requestYOffset + 1, Math.floor(coveredBottom - yOverlap));
-        if (coveredBottom <= lastCoveredBottom + 1) {
-          requestYOffset = Math.min(outputHeight - 1, requestYOffset + Math.max(1, Math.floor(stepY / 3)));
-        } else {
-          requestYOffset = Math.min(outputHeight - 1, nextByCoverage);
-          lastCoveredBottom = coveredBottom;
+        context.drawImage(
+          image,
+          sourceX,
+          adjustedSourceY,
+          drawWidth,
+          adjustedDrawHeight,
+          destX,
+          adjustedDestY,
+          drawWidth,
+          adjustedDrawHeight
+        );
+
+        maxDrawnRight = Math.max(maxDrawnRight, destX + drawWidth);
+        maxDrawnBottom = Math.max(maxDrawnBottom, adjustedDestY + adjustedDrawHeight);
+        columnMaxDrawnBottom = Math.max(columnMaxDrawnBottom, adjustedDestY + adjustedDrawHeight);
+
+        const actualOverlapHeight = overlapHeight / scaleY;
+        const actualDrawHeight = adjustedDrawHeight / scaleY;
+        const actualDrawTop = localTop + actualOverlapHeight;
+        const actualDrawBottom = actualDrawTop + actualDrawHeight;
+        columnMaxDrawnBottomLocal = Math.max(columnMaxDrawnBottomLocal, actualDrawBottom);
+
+        if (columnMaxDrawnBottomLocal >= outputHeight - 1) {
+          break;
         }
+
+        requestYOffset = Math.min(
+          outputHeight - 1,
+          Math.max(requestYOffset + 1, Math.floor(columnMaxDrawnBottomLocal - yOverlap))
+        );
       }
     }
 
@@ -560,7 +553,7 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
       }
     }
 
-    return canvas.toDataURL('image/png');
+    resultCanvas = canvas;
   } finally {
     removeCaptureMarker(element, markerState);
 
@@ -574,11 +567,17 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
     window.scrollTo({ left: initialWindowX, top: initialWindowY });
     document.documentElement.style.scrollBehavior = originalScrollBehavior;
   }
+
+  if (!resultCanvas) {
+    throw new Error('キャプチャ画像を生成できませんでした。');
+  }
+
+  return canvasToBlob(resultCanvas);
 }
 
 function collectScrollableAncestors(element: HTMLElement): ScrollableAncestor[] {
   const ancestors: ScrollableAncestor[] = [];
-  let current = element.parentElement;
+  let current: HTMLElement | null = element;
 
   while (current) {
     if (current !== document.body && current !== document.documentElement) {
@@ -631,14 +630,81 @@ function createCaptureMarker(element: HTMLElement): CaptureMarkerState {
   return { marker, restorePosition, didSetRelative };
 }
 
-function moveCaptureMarkerToOffset(markerState: CaptureMarkerState, xOffset: number, yOffset: number): void {
+function moveCaptureMarkerToOffset(
+  markerState: CaptureMarkerState,
+  scrollableAncestors: ScrollableAncestor[],
+  xOffset: number,
+  yOffset: number
+): void {
   markerState.marker.style.left = `${Math.round(xOffset)}px`;
   markerState.marker.style.top = `${Math.round(yOffset)}px`;
-  markerState.marker.scrollIntoView({
-    behavior: 'auto',
-    block: 'center',
-    inline: 'center'
+  alignMarkerIntoView(markerState.marker, scrollableAncestors);
+}
+
+function alignMarkerIntoView(marker: HTMLElement, scrollableAncestors: ScrollableAncestor[]): void {
+  for (const ancestor of scrollableAncestors) {
+    alignMarkerInContainer(marker, ancestor.node);
+  }
+
+  alignMarkerInViewport(marker);
+}
+
+function alignMarkerInContainer(marker: HTMLElement, container: HTMLElement): void {
+  const markerRect = marker.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+
+  if (canElementScrollInAxis(container, 'y')) {
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const desiredScrollTop = clamp(
+      Math.round(container.scrollTop + getCenterDelta(markerRect.top, markerRect.height, containerRect.top, container.clientHeight)),
+      0,
+      maxScrollTop
+    );
+    container.scrollTop = desiredScrollTop;
+  }
+
+  if (canElementScrollInAxis(container, 'x')) {
+    const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+    const desiredScrollLeft = clamp(
+      Math.round(container.scrollLeft + getCenterDelta(markerRect.left, markerRect.width, containerRect.left, container.clientWidth)),
+      0,
+      maxScrollLeft
+    );
+    container.scrollLeft = desiredScrollLeft;
+  }
+}
+
+function alignMarkerInViewport(marker: HTMLElement): void {
+  const markerRect = marker.getBoundingClientRect();
+  const scrollingElement = document.scrollingElement;
+  if (!scrollingElement) {
+    return;
+  }
+
+  const maxScrollTop = Math.max(0, scrollingElement.scrollHeight - window.innerHeight);
+  const maxScrollLeft = Math.max(0, scrollingElement.scrollWidth - window.innerWidth);
+  const desiredScrollTop = clamp(
+    Math.round(window.scrollY + getCenterDelta(markerRect.top, markerRect.height, 0, window.innerHeight)),
+    0,
+    maxScrollTop
+  );
+  const desiredScrollLeft = clamp(
+    Math.round(window.scrollX + getCenterDelta(markerRect.left, markerRect.width, 0, window.innerWidth)),
+    0,
+    maxScrollLeft
+  );
+
+  window.scrollTo({
+    left: desiredScrollLeft,
+    top: desiredScrollTop,
+    behavior: 'auto'
   });
+}
+
+function getCenterDelta(targetStart: number, targetSize: number, containerStart: number, containerSize: number): number {
+  const targetCenter = targetStart + targetSize / 2;
+  const containerCenter = containerStart + containerSize / 2;
+  return targetCenter - containerCenter;
 }
 
 function removeCaptureMarker(element: HTMLElement, markerState: CaptureMarkerState): void {
@@ -872,6 +938,37 @@ function loadImage(dataUrl: string): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error('スクリーンショットの読み込みに失敗しました。'));
     image.src = dataUrl;
   });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('画像の書き出しに失敗しました。'));
+        return;
+      }
+
+      resolve(blob);
+    }, 'image/png');
+  });
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.rel = 'noopener';
+  link.style.display = 'none';
+  link.setAttribute(UI_MARKER_ATTR, UI_MARKER_VALUE);
+
+  document.documentElement.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 60_000);
 }
 
 function buildDownloadFilename(element: HTMLElement): string {

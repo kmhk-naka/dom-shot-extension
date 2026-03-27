@@ -9,18 +9,17 @@ import {
 
 const CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND =
   chrome.tabs.MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND ?? 2;
+const CAPTURE_VISIBLE_TAB_WINDOW_MS = 1_000;
 const CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS = Math.ceil(1000 / CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND);
-const CAPTURE_VISIBLE_TAB_BACKOFF_STEP_MS = 80;
-const CAPTURE_VISIBLE_TAB_MAX_BACKOFF_MS = CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS + 400;
-const CAPTURE_VISIBLE_TAB_MAX_RETRIES = 3;
+const CAPTURE_VISIBLE_TAB_MAX_RETRIES = 1;
+const CAPTURE_VISIBLE_TAB_SAFETY_BUFFER_MS = 34;
 const ACTION_DEFAULT_TITLE = 'Start DOM Capture';
 const ACTION_CAPTURE_TITLE = 'DOM Shot: キャプチャ中';
 const ACTION_CAPTURE_BADGE_TEXT = 'CAP';
 const ACTION_CAPTURE_BADGE_COLOR = '#2563eb';
 
 let captureQueue: Promise<void> = Promise.resolve();
-let captureBlockedUntil = 0;
-let captureVisibleTabBackoffMs = CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS;
+let recentCaptureCallStartedAts: number[] = [];
 const invokedTabIds = new Set<number>();
 
 function toErrorMessage(error: unknown): string {
@@ -35,6 +34,30 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     globalThis.setTimeout(resolve, ms);
   });
+}
+
+function pruneRecentCaptureCalls(now = Date.now()): void {
+  recentCaptureCallStartedAts = recentCaptureCallStartedAts.filter(
+    (startedAt) => now - startedAt < CAPTURE_VISIBLE_TAB_WINDOW_MS
+  );
+}
+
+async function waitForCaptureBudget(): Promise<void> {
+  while (true) {
+    const now = Date.now();
+    pruneRecentCaptureCalls(now);
+
+    if (recentCaptureCallStartedAts.length < CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND) {
+      return;
+    }
+
+    const oldestStartedAt = recentCaptureCallStartedAts[0];
+    const waitMs = Math.max(
+      1,
+      oldestStartedAt + CAPTURE_VISIBLE_TAB_WINDOW_MS - now + CAPTURE_VISIBLE_TAB_SAFETY_BUFFER_MS
+    );
+    await wait(waitMs);
+  }
 }
 
 async function setCaptureBadge(tabId: number | undefined): Promise<void> {
@@ -105,24 +128,18 @@ async function toCaptureFailureMessage(
   return toErrorMessage(error);
 }
 
-async function waitForCaptureSlot(): Promise<void> {
-  const waitMs = Math.max(0, captureBlockedUntil - Date.now());
-
-  if (waitMs > 0) {
-    await wait(waitMs);
-  }
-}
-
 async function captureVisibleTabWithRetry(windowId: number | undefined): Promise<string> {
   for (let attempt = 0; attempt <= CAPTURE_VISIBLE_TAB_MAX_RETRIES; attempt += 1) {
     try {
+      await waitForCaptureBudget();
+      const startedAt = Date.now();
+      pruneRecentCaptureCalls(startedAt);
+      recentCaptureCallStartedAts.push(startedAt);
+
       const dataUrl =
         typeof windowId === 'number'
           ? await chrome.tabs.captureVisibleTab(windowId, { format: 'png' })
         : await chrome.tabs.captureVisibleTab({ format: 'png' });
-
-      captureBlockedUntil = 0;
-      captureVisibleTabBackoffMs = CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS;
 
       return dataUrl;
     } catch (error) {
@@ -130,12 +147,7 @@ async function captureVisibleTabWithRetry(windowId: number | undefined): Promise
         throw error;
       }
 
-      captureBlockedUntil = Date.now() + captureVisibleTabBackoffMs;
-      await waitForCaptureSlot();
-      captureVisibleTabBackoffMs = Math.min(
-        CAPTURE_VISIBLE_TAB_MAX_BACKOFF_MS,
-        captureVisibleTabBackoffMs + CAPTURE_VISIBLE_TAB_BACKOFF_STEP_MS
-      );
+      await wait(Math.max(CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS, CAPTURE_VISIBLE_TAB_SAFETY_BUFFER_MS));
     }
   }
 
@@ -143,10 +155,7 @@ async function captureVisibleTabWithRetry(windowId: number | undefined): Promise
 }
 
 async function queueVisibleCapture(windowId: number | undefined): Promise<string> {
-  const task = captureQueue.then(async () => {
-    await waitForCaptureSlot();
-    return captureVisibleTabWithRetry(windowId);
-  });
+  const task = captureQueue.then(async () => captureVisibleTabWithRetry(windowId));
 
   captureQueue = task.then(
     () => undefined,
@@ -247,7 +256,7 @@ chrome.runtime.onMessage.addListener(
       void (async () => {
         try {
           const downloadId = await chrome.downloads.download({
-            url: message.dataUrl,
+            url: message.url,
             filename: sanitizeFilename(message.filename),
             saveAs: false,
             conflictAction: 'uniquify'

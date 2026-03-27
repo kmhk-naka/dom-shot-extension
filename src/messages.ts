@@ -29,7 +29,7 @@ export type RequestVisibleCaptureMessage = {
 
 export type DownloadImageMessage = {
   type: typeof MESSAGE_TYPE.DOWNLOAD_IMAGE;
-  dataUrl: string;
+  url: string;
   filename: string;
 };
 

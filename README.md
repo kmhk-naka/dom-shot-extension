@@ -48,6 +48,7 @@ pnpm package
 ## Permissions / Data Handling
 
 - `activeTab`: ユーザーが拡張アイコンを押した現在のタブだけを対象にします
+- `host_permissions: <all_urls>`: `chrome.tabs.captureVisibleTab()` を安定して実行するために使用します
 - `scripting`: 対象ページへ選択UIとキャプチャ処理を注入します
 - `downloads`: 生成したPNGをローカルへ保存します
 - 外部通信: なし
@@ -57,4 +58,5 @@ pnpm package
 
 - `iframe` と `Shadow DOM` は対象外
 - `chrome://` などの保護ページでは実行不可
+- `file://` で `example_target.html` を開いて試す場合は、拡張詳細画面で `ファイルの URL へのアクセスを許可する` を有効にする必要があります
 - 極端に大きい要素はキャンバス制限で失敗する場合あり

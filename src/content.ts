@@ -4,7 +4,8 @@ import {
   type ContentRequestMessage,
   type DownloadImageMessage,
   type DownloadResponse,
-  type RequestVisibleCaptureMessage
+  type RequestVisibleCaptureMessage,
+  type StatusResponse
 } from './messages';
 
 declare global {
@@ -304,7 +305,7 @@ function isUiNode(node: Element): boolean {
   return node.closest(`[${UI_MARKER_ATTR}="${UI_MARKER_VALUE}"]`) !== null;
 }
 
-function showToast(message: string): void {
+function showToast(message: string, durationMs = 3_000): void {
   ui.toast.textContent = message;
   ui.toast.style.display = 'block';
 
@@ -315,7 +316,16 @@ function showToast(message: string): void {
   toastTimerId = window.setTimeout(() => {
     ui.toast.style.display = 'none';
     toastTimerId = null;
-  }, 3_000);
+  }, durationMs);
+}
+
+function hideToast(): void {
+  ui.toast.style.display = 'none';
+
+  if (toastTimerId !== null) {
+    window.clearTimeout(toastTimerId);
+    toastTimerId = null;
+  }
 }
 
 async function runCapture(selected: HTMLElement): Promise<void> {
@@ -324,6 +334,11 @@ async function runCapture(selected: HTMLElement): Promise<void> {
   hideUiForCapture();
 
   try {
+    await sendMessageToBackground<
+      { type: typeof MESSAGE_TYPE.CAPTURE_SESSION_STARTED },
+      StatusResponse
+    >({ type: MESSAGE_TYPE.CAPTURE_SESSION_STARTED });
+
     const imageDataUrl = await captureElementImage(selected);
     const filename = buildDownloadFilename(selected);
 
@@ -340,9 +355,18 @@ async function runCapture(selected: HTMLElement): Promise<void> {
     showToast(`保存しました: ${filename}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    showToast(`キャプチャ失敗: ${message}`);
+    showToast(`キャプチャ失敗: ${message}`, 8_000);
     console.error('[dom-shot] capture failed:', error);
   } finally {
+    try {
+      await sendMessageToBackground<
+        { type: typeof MESSAGE_TYPE.CAPTURE_SESSION_FINISHED },
+        StatusResponse
+      >({ type: MESSAGE_TYPE.CAPTURE_SESSION_FINISHED });
+    } catch {
+      // Ignore teardown notification failures.
+    }
+
     hideUiForCapture();
     highlightedElement = null;
     mode = 'idle';
@@ -411,6 +435,7 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
     for (const xOffset of xOffsets) {
       let requestYOffset = 0;
       let lastCoveredBottom = -1;
+      let columnMaxDrawnBottom = 0;
 
       for (let iteration = 0; iteration < 180 && requestYOffset < outputHeight; iteration += 1) {
         moveCaptureMarkerToOffset(markerState, xOffset, requestYOffset);
@@ -475,21 +500,28 @@ async function captureElementImage(element: HTMLElement): Promise<string> {
 
         const drawWidth = Math.min(sourceWidth, remainingWidth);
         const drawHeight = Math.min(sourceHeight, remainingHeight);
+        const overlapHeight = Math.min(drawHeight, Math.max(0, columnMaxDrawnBottom - destY));
+        const adjustedSourceY = sourceY + overlapHeight;
+        const adjustedDestY = destY + overlapHeight;
+        const adjustedDrawHeight = drawHeight - overlapHeight;
 
-        context.drawImage(
-          image,
-          sourceX,
-          sourceY,
-          drawWidth,
-          drawHeight,
-          destX,
-          destY,
-          drawWidth,
-          drawHeight
-        );
+        if (adjustedDrawHeight > 0) {
+          context.drawImage(
+            image,
+            sourceX,
+            adjustedSourceY,
+            drawWidth,
+            adjustedDrawHeight,
+            destX,
+            adjustedDestY,
+            drawWidth,
+            adjustedDrawHeight
+          );
 
-        maxDrawnRight = Math.max(maxDrawnRight, destX + drawWidth);
-        maxDrawnBottom = Math.max(maxDrawnBottom, destY + drawHeight);
+          maxDrawnRight = Math.max(maxDrawnRight, destX + drawWidth);
+          maxDrawnBottom = Math.max(maxDrawnBottom, adjustedDestY + adjustedDrawHeight);
+          columnMaxDrawnBottom = Math.max(columnMaxDrawnBottom, adjustedDestY + adjustedDrawHeight);
+        }
 
         const coveredBottom = localTop + visible.height;
         if (coveredBottom >= outputHeight - 1) {
@@ -619,12 +651,7 @@ function removeCaptureMarker(element: HTMLElement, markerState: CaptureMarkerSta
 
 function hideUiForCapture(): void {
   hideHighlight();
-  ui.toast.style.display = 'none';
-
-  if (toastTimerId !== null) {
-    window.clearTimeout(toastTimerId);
-    toastTimerId = null;
-  }
+  hideToast();
 }
 
 function buildOffsets(totalLength: number, step: number): number[] {

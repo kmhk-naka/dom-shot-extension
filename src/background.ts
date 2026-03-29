@@ -89,18 +89,8 @@ function isActiveTabNotInEffectError(error: unknown): boolean {
   return message.includes("The 'activeTab' permission is not in effect");
 }
 
-function isFileUrl(url: string | undefined): boolean {
-  return typeof url === 'string' && url.startsWith('file://');
-}
-
 function isInvokedTab(tabId: number | undefined): boolean {
   return typeof tabId === 'number' && invokedTabIds.has(tabId);
-}
-
-function isAllowedFileSchemeAccess(): Promise<boolean> {
-  return new Promise((resolve) => {
-    chrome.extension.isAllowedFileSchemeAccess((isAllowed) => resolve(isAllowed));
-  });
 }
 
 async function toCaptureFailureMessage(
@@ -108,16 +98,8 @@ async function toCaptureFailureMessage(
   sender: chrome.runtime.MessageSender
 ): Promise<string> {
   const tabId = sender.tab?.id;
-  const pageUrl = sender.url ?? sender.tab?.url;
 
   if (isActiveTabNotInEffectError(error)) {
-    if (isFileUrl(pageUrl)) {
-      const fileAccessAllowed = await isAllowedFileSchemeAccess();
-      if (!fileAccessAllowed) {
-        return 'file:// ページを撮影するには、拡張の詳細画面で「ファイルの URL へのアクセスを許可する」を有効にしてください。';
-      }
-    }
-
     if (!isInvokedTab(tabId)) {
       return 'このタブで拡張が起動されていません。拡張アイコンを押して選択モードを開始してから、もう一度実行してください。';
     }

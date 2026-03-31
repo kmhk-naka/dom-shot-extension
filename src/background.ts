@@ -14,9 +14,20 @@ const CAPTURE_VISIBLE_TAB_BASE_BACKOFF_MS = Math.ceil(1000 / CAPTURE_VISIBLE_TAB
 const CAPTURE_VISIBLE_TAB_MAX_RETRIES = 1;
 const CAPTURE_VISIBLE_TAB_SAFETY_BUFFER_MS = 34;
 const ACTION_DEFAULT_TITLE = 'Start DOM Capture';
+const ACTION_INACTIVE_TITLE = 'DOM Shot: このページでは利用できません';
 const ACTION_CAPTURE_TITLE = 'DOM Shot: キャプチャ中';
 const ACTION_CAPTURE_BADGE_TEXT = 'CAP';
 const ACTION_CAPTURE_BADGE_COLOR = '#2563eb';
+const ACTIVE_ACTION_ICON_PATHS = {
+  16: 'icons/icon16.png',
+  24: 'icons/icon24.png',
+  32: 'icons/icon32.png'
+} as const;
+const INACTIVE_ACTION_ICON_PATHS = {
+  16: 'icons/icon16-inactive.png',
+  24: 'icons/icon24-inactive.png',
+  32: 'icons/icon32-inactive.png'
+} as const;
 
 let captureQueue: Promise<void> = Promise.resolve();
 let recentCaptureCallStartedAts: number[] = [];
@@ -76,7 +87,7 @@ async function clearCaptureBadge(tabId: number | undefined): Promise<void> {
   }
 
   await chrome.action.setBadgeText({ tabId, text: '' });
-  await chrome.action.setTitle({ tabId, title: ACTION_DEFAULT_TITLE });
+  await syncActionPresentationForTabId(tabId);
 }
 
 function isCaptureQuotaError(error: unknown): boolean {
@@ -91,6 +102,68 @@ function isActiveTabNotInEffectError(error: unknown): boolean {
 
 function isInvokedTab(tabId: number | undefined): boolean {
   return typeof tabId === 'number' && invokedTabIds.has(tabId);
+}
+
+function getTabUrl(tab: chrome.tabs.Tab): string | undefined {
+  return tab.url ?? tab.pendingUrl;
+}
+
+function isTabInspectable(tab: chrome.tabs.Tab): boolean {
+  const tabUrl = getTabUrl(tab);
+  if (!tabUrl) {
+    return false;
+  }
+
+  try {
+    const { protocol } = new URL(tabUrl);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function setActionPresentation(
+  tabId: number,
+  options: {
+    iconPaths: Record<number, string>;
+    title: string;
+  }
+): Promise<void> {
+  await chrome.action.setIcon({ tabId, path: options.iconPaths });
+  await chrome.action.setTitle({ tabId, title: options.title });
+}
+
+async function syncActionPresentation(tab: chrome.tabs.Tab): Promise<void> {
+  if (typeof tab.id !== 'number') {
+    return;
+  }
+
+  if (isTabInspectable(tab)) {
+    await setActionPresentation(tab.id, {
+      iconPaths: ACTIVE_ACTION_ICON_PATHS,
+      title: ACTION_DEFAULT_TITLE
+    });
+    return;
+  }
+
+  await setActionPresentation(tab.id, {
+    iconPaths: INACTIVE_ACTION_ICON_PATHS,
+    title: ACTION_INACTIVE_TITLE
+  });
+}
+
+async function syncActionPresentationForTabId(tabId: number): Promise<void> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    await syncActionPresentation(tab);
+  } catch (error) {
+    console.error('[dom-shot] failed to sync action presentation:', toErrorMessage(error));
+  }
+}
+
+async function syncActionPresentationForActiveTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({ active: true });
+  await Promise.all(tabs.map(async (tab) => syncActionPresentation(tab)));
 }
 
 async function toCaptureFailureMessage(
@@ -181,6 +254,11 @@ chrome.action.onClicked.addListener(async (tab) => {
     return;
   }
 
+  if (!isTabInspectable(tab)) {
+    await syncActionPresentation(tab);
+    return;
+  }
+
   invokedTabIds.add(tab.id);
   await clearCaptureBadge(tab.id);
 
@@ -193,6 +271,26 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   invokedTabIds.delete(tabId);
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  void syncActionPresentationForTabId(activeInfo.tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (typeof changeInfo.status === 'undefined' && typeof changeInfo.url === 'undefined') {
+    return;
+  }
+
+  void syncActionPresentation(tab);
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void syncActionPresentationForActiveTabs();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void syncActionPresentationForActiveTabs();
 });
 
 chrome.runtime.onMessage.addListener(
